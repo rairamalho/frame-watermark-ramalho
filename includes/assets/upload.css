@@ -1,0 +1,27 @@
+/* Frame Watermark — upload UI styles */
+
+.pmd-upload-wrap {
+	margin: 1em 0;
+}
+
+.pmd-upload-wrap input[type="file"] {
+	display: block;
+}
+
+.pmd-gallery-item {
+	display: inline-block;
+	margin: 0.5em;
+	position: relative;
+}
+
+.pmd-gallery-item img {
+	max-width: 150px;
+	height: auto;
+	display: block;
+}
+
+.pmd-gallery-item [data-pmd-remove] {
+	display: block;
+	margin-top: 0.25em;
+	cursor: pointer;
+}

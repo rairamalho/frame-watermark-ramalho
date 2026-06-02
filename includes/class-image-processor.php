@@ -1,238 +1,292 @@
 <?php
+/**
+ * Image processing class for the Frame Watermark plugin.
+ *
+ * Applies watermark or frame overlays to uploaded images using the PHP GD library.
+ * Triggered automatically via the wp_generate_attachment_metadata filter.
+ */
 
-if (!defined('ABSPATH')) exit;
+defined( 'ABSPATH' ) || exit;
 
-class Image_Processor
-{
-    protected int $attachment_id;
-    protected int $post_id;
-    protected string $source_path;
-    protected ?string $final_path = null;
+/**
+ * Class FWR_Image_Processor
+ *
+ * Handles composite image operations (watermark, frame) for post attachments.
+ */
+class FWR_Image_Processor {
 
-    const WIDTH  = 1080;
-    const HEIGHT = 1920;
-    const SIZE_NAME = 'ft-vertical';
+	/** Minimum required image width in pixels. */
+	const WIDTH = 1080;
 
-    /* =====================================================
-     * ENTRY POINT — chamado pelo wp_generate_attachment_metadata
-     * ===================================================== */
-    public static function process_ft_vertical(array $metadata, int $attachment_id): array
-    {
-        // Já processado
-        if (get_post_meta($attachment_id, '_mw_processed', true)) {
-            return $metadata;
-        }
+	/** Minimum required image height in pixels. */
+	const HEIGHT = 1920;
 
-        // Size não existe
-        if (empty($metadata['sizes'][self::SIZE_NAME])) {
-            // Aplicar aqui a moldura mesmo sem o ft-vertical, usando a imagem original
-            $upload_dir = wp_upload_dir();
-            $original_path = trailingslashit($upload_dir['basedir']) . $metadata['file'];
-            if (!file_exists($original_path)) {
-                return $metadata;
-            }
+	/** Registered WordPress image size name used by this plugin. */
+	const SIZE_NAME = 'ft-vertical';
 
-            // testar para ver se a imagem original tem pelo menos 1080x1920, caso contrário não processar
-            $image_info = getimagesize($original_path);
-            if ($image_info[0] < self::WIDTH || $image_info[1] < self::HEIGHT) {
-                return $metadata;
-            }
+	/** @var int WordPress attachment post ID. */
+	protected int $attachment_id;
 
-            $processor = new self($attachment_id, $original_path);
-            $processor->process();
-            if ($processor->final_path) {
-                // Atualiza o arquivo original
-                copy($processor->final_path, $original_path);
-                
-                update_post_meta($attachment_id, '_mw_processed', true);
-            }
+	/** @var int Parent post ID (the post the attachment belongs to). */
+	protected int $post_id;
 
+	/** @var string Absolute filesystem path to the source image. */
+	protected string $source_path;
 
-            return $metadata;
-        }else{
-            $upload_dir = wp_upload_dir();
-            $size = $metadata['sizes'][self::SIZE_NAME];
+	/** @var string|null Absolute path to the processed output image, or null if processing failed. */
+	protected ?string $final_path = null;
 
-            $ft_path = trailingslashit($upload_dir['basedir']) .
-                dirname($metadata['file']) . '/' .
-                $size['file'];
+	// -------------------------------------------------------------------------
+	// Entry point
+	// -------------------------------------------------------------------------
 
-            if (!file_exists($ft_path)) {
-                return $metadata;
-            }
+	/**
+	 * Filter callback for wp_generate_attachment_metadata.
+	 *
+	 * Processes the ft-vertical image size when it exists, otherwise falls back
+	 * to the original file, provided it meets the minimum dimension requirements.
+	 * Sets the _mw_processed post meta flag to prevent double-processing.
+	 *
+	 * @param array $metadata      Attachment metadata array.
+	 * @param int   $attachment_id Attachment post ID.
+	 * @return array Possibly modified metadata.
+	 */
+	public static function process_ft_vertical( array $metadata, int $attachment_id ): array {
+		// Prevent reprocessing on subsequent metadata regenerations.
+		if ( get_post_meta( $attachment_id, '_mw_processed', true ) ) {
+			return $metadata;
+		}
 
-            $processor = new self($attachment_id, $ft_path);
-            $processor->process();
+		$upload_dir    = wp_upload_dir();
+		$original_path = trailingslashit( $upload_dir['basedir'] ) . $metadata['file'];
+		$has_ft_size   = ! empty( $metadata['sizes'][ self::SIZE_NAME ] );
 
-            if ($processor->final_path) {
-                // Atualiza o size ft-vertical
-                $metadata['sizes'][self::SIZE_NAME]['file'] = basename($processor->final_path);
-                
-                // Atualiza o arquivo original
-                $upload_dir = wp_upload_dir();
-                $original_path = trailingslashit($upload_dir['basedir']) . $metadata['file'];
-                copy($processor->final_path, $original_path);
-                
-                update_post_meta($attachment_id, '_mw_processed', true);
-            }
+		if ( $has_ft_size ) {
+			$size   = $metadata['sizes'][ self::SIZE_NAME ];
+			$source = trailingslashit( $upload_dir['basedir'] )
+				. dirname( $metadata['file'] ) . '/'
+				. $size['file'];
+		} else {
+			$source = $original_path;
+		}
 
+		if ( ! file_exists( $source ) ) {
+			return $metadata;
+		}
 
-            return $metadata;
-        }
-    }
+		// Reject images smaller than the minimum required dimensions.
+		$image_info = getimagesize( $source );
+		if ( ! $image_info || $image_info[0] < self::WIDTH || $image_info[1] < self::HEIGHT ) {
+			return $metadata;
+		}
 
-    /* =====================================================
-     * CONSTRUTOR
-     * ===================================================== */
-    public function __construct(int $attachment_id, string $source_path)
-    {
-        $this->attachment_id = $attachment_id;
-        $this->post_id = wp_get_post_parent_id($attachment_id);
-        $this->source_path = $source_path;
-    }
+		$processor = new self( $attachment_id, $source );
+		$processor->process();
 
-    /* =====================================================
-     * PROCESSAMENTO PRINCIPAL
-     * ===================================================== */
-    protected function process(): void
-    {
-        if (!$this->post_id) return;
+		if ( ! $processor->final_path ) {
+			return $metadata;
+		}
 
-        $tipo = get_field('tipo_imagem', $this->post_id);
-        $overlay_id = get_field('imagem_overlay', $this->post_id);
+		// Copy the processed file back over the original so WordPress serves
+		// the composited version at its canonical URL.
+		if ( ! copy( $processor->final_path, $original_path ) ) {
+			error_log( sprintf( '[FWR] Failed to copy processed image to %s', $original_path ) );
+			return $metadata;
+		}
 
-        if (!$tipo || !$overlay_id) return;
+		if ( $has_ft_size ) {
+			$metadata['sizes'][ self::SIZE_NAME ]['file'] = basename( $processor->final_path );
+		}
 
-        if ($tipo === 'marca_dagua') {
-            $this->apply_overlay($overlay_id, 'watermark');
-        }
+		update_post_meta( $attachment_id, '_mw_processed', true );
 
-        if ($tipo === 'moldura') {
-            $this->apply_frame($overlay_id);
-        }
-    }
+		return $metadata;
+	}
 
-    /* =====================================================
-     * WATERMARK
-     * ===================================================== */
-    protected function apply_overlay(int $overlay_id, string $suffix): void
-    {
-        $overlay_path = get_attached_file($overlay_id);
-        if (!file_exists($overlay_path)) return;
+	// -------------------------------------------------------------------------
+	// Constructor
+	// -------------------------------------------------------------------------
 
-        $new_path = $this->generate_new_path($suffix);
-        copy($this->source_path, $new_path);
+	/**
+	 * @param int    $attachment_id WordPress attachment ID.
+	 * @param string $source_path   Absolute path to the image to process.
+	 */
+	public function __construct( int $attachment_id, string $source_path ) {
+		$this->attachment_id = $attachment_id;
+		$this->post_id       = (int) wp_get_post_parent_id( $attachment_id );
+		$this->source_path   = $source_path;
+	}
 
-        $this->composite_images(
-            $new_path,
-            $overlay_path,
-            0,
-            0,
-            100
-        );
+	// -------------------------------------------------------------------------
+	// Processing pipeline
+	// -------------------------------------------------------------------------
 
-        $this->final_path = $new_path;
-    }
+	/**
+	 * Reads ACF field values and dispatches to the appropriate compositing method.
+	 *
+	 * Bails silently when there is no parent post or required ACF fields are empty.
+	 */
+	protected function process(): void {
+		if ( ! $this->post_id ) {
+			return;
+		}
 
-    /* =====================================================
-     * FRAME
-     * ===================================================== */
-    protected function apply_frame(int $frame_id): void
-    {
-        $frame_path = get_attached_file($frame_id);
-        if (!file_exists($frame_path)) return;
+		$image_type = get_field( 'tipo_imagem', $this->post_id );
+		$overlay_id = get_field( 'imagem_overlay', $this->post_id );
 
-        $new_path = $this->generate_new_path('frame');
+		if ( ! $image_type || ! $overlay_id ) {
+			return;
+		}
 
-        // Copia moldura como base
-        copy($frame_path, $new_path);
+		if ( 'marca_dagua' === $image_type ) {
+			$this->apply_overlay( (int) $overlay_id, 'watermark' );
+		}
 
-        // Sobrepõe a imagem ft-vertical
-        $this->composite_images(
-            $new_path,
-            $this->source_path,
-            76,
-            76,
-            100
-        );
+		if ( 'moldura' === $image_type ) {
+			$this->apply_frame( (int) $overlay_id );
+		}
+	}
 
-        $this->final_path = $new_path;
-    }
+	// -------------------------------------------------------------------------
+	// Compositing strategies
+	// -------------------------------------------------------------------------
 
-    /* =====================================================
-     * COMPOSITE (preserva PNG alpha)
-     * ===================================================== */
-    protected function composite_images(
-        string $base_path,
-        string $overlay_path,
-        int $x,
-        int $y,
-        int $opacity = 100
-    ): void {
+	/**
+	 * Overlays a watermark image on top of the source image at position (0, 0).
+	 *
+	 * @param int    $overlay_id Attachment ID of the watermark image.
+	 * @param string $suffix     Filename suffix used when generating the output path.
+	 */
+	protected function apply_overlay( int $overlay_id, string $suffix ): void {
+		$overlay_path = get_attached_file( $overlay_id );
 
-        $base = imagecreatefromstring(file_get_contents($base_path));
-        $overlay = imagecreatefromstring(file_get_contents($overlay_path));
+		if ( ! $overlay_path || ! file_exists( $overlay_path ) ) {
+			error_log( sprintf( '[FWR] Overlay file not found for attachment %d', $overlay_id ) );
+			return;
+		}
 
-        if (!$base || !$overlay) return;
+		$new_path = $this->generate_new_path( $suffix );
+		copy( $this->source_path, $new_path );
 
-        // Garante alpha no base
-        imagealphablending($base, true);
-        imagesavealpha($base, true);
+		$this->composite_images( $new_path, $overlay_path, 0, 0, 100 );
 
-        // Garante alpha no overlay
-        imagealphablending($overlay, true);
-        imagesavealpha($overlay, true);
+		$this->final_path = $new_path;
+	}
 
-        $is_png_overlay = strtolower(pathinfo($overlay_path, PATHINFO_EXTENSION)) === 'png';
+	/**
+	 * Composites the source image on top of a frame image at position (76, 76).
+	 *
+	 * The frame image is the background canvas; the source image is placed inside it.
+	 *
+	 * @param int $frame_id Attachment ID of the frame image.
+	 */
+	protected function apply_frame( int $frame_id ): void {
+		$frame_path = get_attached_file( $frame_id );
 
-        if ($is_png_overlay && $opacity === 100) {
-            // PNG com transparência REAL
-            imagecopy(
-                $base,
-                $overlay,
-                $x,
-                $y,
-                0,
-                0,
-                imagesx($overlay),
-                imagesy($overlay)
-            );
-        } else {
-            // JPG ou PNG com opacidade manual
-            imagecopymerge(
-                $base,
-                $overlay,
-                $x,
-                $y,
-                0,
-                0,
-                imagesx($overlay),
-                imagesy($overlay),
-                $opacity
-            );
-        }
+		if ( ! $frame_path || ! file_exists( $frame_path ) ) {
+			error_log( sprintf( '[FWR] Frame file not found for attachment %d', $frame_id ) );
+			return;
+		}
 
-        $ext = strtolower(pathinfo($base_path, PATHINFO_EXTENSION));
+		$new_path = $this->generate_new_path( 'frame' );
 
-        if ($ext === 'png') {
-            imagepng($base, $base_path);
-        } else {
-            imagejpeg($base, $base_path, 90);
-        }
+		// The frame image is the background canvas; copy it first.
+		copy( $frame_path, $new_path );
 
-        imagedestroy($base);
-        imagedestroy($overlay);
-    }
+		// Place the source image inside the frame at the defined offset.
+		$this->composite_images( $new_path, $this->source_path, 76, 76, 100 );
 
-    /* =====================================================
-     * PATH
-     * ===================================================== */
-    protected function generate_new_path(string $suffix): string
-    {
-        $info = pathinfo($this->source_path);
+		$this->final_path = $new_path;
+	}
 
-        return $info['dirname'] . '/' .
-            $info['filename'] . '-' . $suffix . '-' . uniqid() . '.' .
-            $info['extension'];
-    }
+	// -------------------------------------------------------------------------
+	// GD compositing
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Composites $overlay_path on top of $base_path using the PHP GD library.
+	 *
+	 * Preserves PNG alpha transparency. For PNG overlays at full opacity,
+	 * uses imagecopy() which respects the alpha channel. For JPEGs or partial
+	 * opacity, falls back to imagecopymerge() which discards the alpha channel.
+	 *
+	 * @param string $base_path    Absolute path to the base (destination) image. Modified in-place.
+	 * @param string $overlay_path Absolute path to the image to composite on top.
+	 * @param int    $x            Horizontal destination offset in pixels.
+	 * @param int    $y            Vertical destination offset in pixels.
+	 * @param int    $opacity      Opacity percentage (0–100). Only respected for non-PNG overlays.
+	 */
+	protected function composite_images(
+		string $base_path,
+		string $overlay_path,
+		int $x,
+		int $y,
+		int $opacity = 100
+	): void {
+		$base_data    = file_get_contents( $base_path );
+		$overlay_data = file_get_contents( $overlay_path );
+
+		if ( false === $base_data || false === $overlay_data ) {
+			error_log( sprintf( '[FWR] Failed to read image data from %s or %s', $base_path, $overlay_path ) );
+			return;
+		}
+
+		$base    = imagecreatefromstring( $base_data );
+		$overlay = imagecreatefromstring( $overlay_data );
+
+		if ( ! $base || ! $overlay ) {
+			error_log( sprintf( '[FWR] GD could not decode image: %s / %s', $base_path, $overlay_path ) );
+			return;
+		}
+
+		// Ensure the base canvas supports full alpha transparency.
+		imagealphablending( $base, true );
+		imagesavealpha( $base, true );
+
+		// Ensure the overlay retains its alpha channel during compositing.
+		imagealphablending( $overlay, true );
+		imagesavealpha( $overlay, true );
+
+		$is_png_overlay = 'png' === strtolower( pathinfo( $overlay_path, PATHINFO_EXTENSION ) );
+
+		if ( $is_png_overlay && 100 === $opacity ) {
+			// imagecopy() preserves real PNG alpha transparency.
+			imagecopy( $base, $overlay, $x, $y, 0, 0, imagesx( $overlay ), imagesy( $overlay ) );
+		} else {
+			// imagecopymerge() blends by percentage but ignores the alpha channel.
+			imagecopymerge( $base, $overlay, $x, $y, 0, 0, imagesx( $overlay ), imagesy( $overlay ), $opacity );
+		}
+
+		$ext = strtolower( pathinfo( $base_path, PATHINFO_EXTENSION ) );
+
+		if ( 'png' === $ext ) {
+			imagepng( $base, $base_path );
+		} else {
+			imagejpeg( $base, $base_path, 90 );
+		}
+
+		// GdImage objects are garbage-collected automatically in PHP 8.1+;
+		// imagedestroy() is deprecated and omitted intentionally.
+		unset( $base, $overlay );
+	}
+
+	// -------------------------------------------------------------------------
+	// Helpers
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Generates a unique output file path by appending a suffix and a uniqid token.
+	 *
+	 * Example output: /uploads/2025/06/photo-watermark-6642a1b3e4c5f.jpg
+	 *
+	 * @param string $suffix Label describing the processing type (e.g. 'watermark', 'frame').
+	 * @return string Absolute filesystem path for the processed output file.
+	 */
+	protected function generate_new_path( string $suffix ): string {
+		$info = pathinfo( $this->source_path );
+
+		return $info['dirname'] . '/'
+			. $info['filename'] . '-' . $suffix . '-' . uniqid() . '.'
+			. $info['extension'];
+	}
 }

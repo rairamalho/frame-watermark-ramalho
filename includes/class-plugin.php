@@ -1,39 +1,58 @@
 <?php
+/**
+ * Main plugin bootstrap class.
+ *
+ * Loads all dependencies and registers WordPress hooks.
+ */
 
-if (!defined('ABSPATH')) exit;
+defined( 'ABSPATH' ) || exit;
 
-class MW_Plugin
-{
-  const IMG_WIDTH  = 1080;
-  const IMG_HEIGHT = 1920;
-  const POST_TYPE = 'post';
+/**
+ * Class FWR_Plugin
+ *
+ * Entry point for the Frame Watermark plugin.
+ * Call FWR_Plugin::init() on the plugins_loaded hook.
+ */
+class FWR_Plugin {
 
-  public static function init()
-  {
-    self::includes();
-  }
+	/** @var string The post type this plugin operates on. */
+	const POST_TYPE = 'post';
 
-  private static function includes()
-  {
-    require_once MW_PLUGIN_PATH . 'includes/AcfFields.php';
-    require_once MW_PLUGIN_PATH . 'includes/class-image-processor.php';
-    require_once MW_PLUGIN_PATH . 'includes/class-upload-galeria.php';
+	/**
+	 * Initialises the plugin by loading files and registering hooks.
+	 */
+	public static function init(): void {
+		self::load_dependencies();
+		self::register_hooks();
+	}
 
-    self::hooks();
-  }
+	/**
+	 * Requires all class files needed by the plugin.
+	 */
+	private static function load_dependencies(): void {
+		require_once FWR_PLUGIN_PATH . 'includes/class-acf-fields.php';
+		require_once FWR_PLUGIN_PATH . 'includes/class-image-processor.php';
+		require_once FWR_PLUGIN_PATH . 'includes/class-upload-handler.php';
+	}
 
-  private static function hooks()
-  {
-    add_action('acf/init', ['PMD\AcfFields', 'register']);
-    add_action('init', function () {
-      new Upload_Galeria();
-    });
+	/**
+	 * Registers all WordPress action and filter hooks.
+	 */
+	private static function register_hooks(): void {
+		add_action( 'acf/init', array( 'FWR_ACF_Fields', 'register' ) );
 
-    add_filter(
-      'wp_generate_attachment_metadata',
-      ['Image_Processor', 'process_ft_vertical'],
-      10,
-      2
-    );
-  }
+		add_action(
+			'init',
+			static function () {
+				new FWR_Upload_Handler();
+			}
+		);
+
+		add_filter(
+			'wp_generate_attachment_metadata',
+			array( 'FWR_Image_Processor', 'process_ft_vertical' ),
+			10,
+			2
+		);
+	}
 }
